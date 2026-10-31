@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""callnote: auto-record browser calls, transcribe with Whisper, summarize with an LLM.
+"""callnote: auto-record browser calls, transcribe with Whisper, write session notes with an LLM.
 
 Usage:
   callnote.py watch          # wait for calls, record and summarize automatically
@@ -15,6 +15,7 @@ APPS = re.compile(os.getenv("CALLNOTE_APPS", "chrom|firefox|brave"), re.I)
 ME, THEM = os.getenv("CALLNOTE_ME", "Me"), os.getenv("CALLNOTE_THEM", "Them")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_LANG = os.getenv("WHISPER_LANG") or None  # None = auto-detect
+WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS") or None  # book titles, program terms
 SUMMARY_LANG = os.getenv("SUMMARY_LANG", "Russian")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
@@ -29,6 +30,10 @@ PROMPT = """Below is a transcript of a video call. Write a concise summary in {l
 4. Open questions.
 Use only what is in the transcript. Fix obvious speech-recognition errors by context.
 
+Rules: use only what is in the transcript; write "?" instead of guessing a page or a quote;
+fix obvious speech-recognition errors from context; skip small talk.
+
+Transcript:
 {transcript}"""
 
 
@@ -76,7 +81,8 @@ def transcribe(d):
     lines = []
     for file, who in (("me.wav", ME), ("them.wav", THEM)):
         segs, _ = model.transcribe(str(d / file), language=WHISPER_LANG,
-                                   vad_filter=True, condition_on_previous_text=False)
+                                   hotwords=WHISPER_HOTWORDS, vad_filter=True,
+                                   condition_on_previous_text=False)
         lines += [(s.start, who, s.text.strip()) for s in segs]
     return "\n".join(f"[{int(t) // 60:02}:{int(t) % 60:02}] {who}: {text}"
                      for t, who, text in sorted(lines))
@@ -93,7 +99,7 @@ def llm(prompt):
     """Claude API if ANTHROPIC_API_KEY is set, otherwise local Ollama."""
     if key := os.getenv("ANTHROPIC_API_KEY"):
         r = post("https://api.anthropic.com/v1/messages",
-                 {"model": CLAUDE_MODEL, "max_tokens": 4000,
+                 {"model": CLAUDE_MODEL, "max_tokens": 8000,
                   "messages": [{"role": "user", "content": prompt}]},
                  {"x-api-key": key, "anthropic-version": "2023-06-01"})
         return r["content"][0]["text"]
@@ -110,10 +116,21 @@ def process(d):
     if not transcript:
         return notify(f"No speech found in {d.name}")
     (d / "transcript.txt").write_text(transcript + "\n")
-    summary = llm(PROMPT.format(lang=SUMMARY_LANG, transcript=transcript))
+    summary = llm(PROMPT.format(lang=SUMMARY_LANG, transcript=transcript)).strip()
     note = d / "summary.md"
-    note.write_text(f"# Call {d.name}\n\n{summary}\n\n## Transcript\n\n{transcript}\n")
+    note.write_text(f"{summary}\n\n---\n{d.name} · [transcript](transcript.txt)\n")
+    add_to_index(d, summary)
     notify(f"Summary ready: {note}")
+
+
+def add_to_index(d, summary):
+    """Append the session to index.md: the table of contents, in call order."""
+    index = d.parent / "index.md"
+    if d.name in (index.read_text() if index.exists() else ""):
+        return  # reprocessed session, already listed
+    title = next((l[2:] for l in summary.splitlines() if l.startswith("# ")), "")
+    with index.open("a") as f:
+        f.write(f"- [{d.name}]({d.name}/summary.md) {title}\n")
 
 
 def finish(d, duration):

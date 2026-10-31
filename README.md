@@ -10,7 +10,23 @@ with Whisper and writes a summary with an LLM.
    Separate tracks give speaker labels for free.
 3. When the browser releases the mic for 5+ seconds, recording stops.
 4. faster-whisper transcribes both tracks; lines are merged by timestamp.
-5. The transcript is summarized by Claude API (if `ANTHROPIC_API_KEY` is set) or local Ollama.
+5. Claude API (if `ANTHROPIC_API_KEY` is set) or local Ollama writes the session notes.
+
+## Output
+
+```
+~/calls/
+├── index.md                 # table of contents: one line per session, in order
+└── 2026-10-25_13-30/
+    ├── summary.md           # session notes (shareable)
+    ├── transcript.txt       # full transcript with timestamps (private)
+    ├── me.wav
+    └── them.wav
+```
+
+`summary.md` sections: overview (literature, pages, theme), session flow with timestamps,
+underlined passages with page numbers, assignments, and a step-by-step plan for running
+the same session with a sponsee (personal stories and identifying details left out).
 
 Output: `~/calls/<date>_<time>/summary.md` (+ `transcript.txt`, wav files).
 
@@ -37,11 +53,14 @@ ANTHROPIC_API_KEY=sk-ant-...      # omit to use Ollama
 OLLAMA_MODEL=qwen2.5:14b
 WHISPER_MODEL=large-v3-turbo      # small/medium on weak CPUs
 WHISPER_LANG=ru                   # omit for auto-detect
+WHISPER_HOTWORDS=...              # book titles and terms, comma-separated
 SUMMARY_LANG=Russian
 CALLNOTE_DIR=~/calls              # e.g. a folder inside your Obsidian vault
 CALLNOTE_ME=Me
 CALLNOTE_THEM=Them
 ```
+
+The note structure is defined by `PROMPT` in `callnote.py`; edit it to change sections.
 
 ## Notes
 
