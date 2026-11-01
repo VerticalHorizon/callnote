@@ -6,7 +6,7 @@ Usage:
   callnote.py record         # record manually until Ctrl+C, then summarize
   callnote.py process DIR    # (re)run transcription and summary for a recording
 """
-import json, os, re, shutil, signal, subprocess, sys, time, urllib.request
+import json, os, re, shutil, signal, subprocess, sys, time, urllib.request, wave
 from datetime import datetime
 from pathlib import Path
 
@@ -76,12 +76,22 @@ def record(stop):
     return d, time.time() - start
 
 
+def load_wav(path):
+    """Read our 16 kHz mono s16 WAV as float32.
+
+    Bypasses faster-whisper's PyAV decoder, which breaks on newer PyAV releases."""
+    import numpy as np
+    with wave.open(str(path)) as w:
+        pcm = w.readframes(w.getnframes())
+    return np.frombuffer(pcm, np.int16).astype(np.float32) / 32768
+
+
 def transcribe(d):
     from faster_whisper import WhisperModel
     model = WhisperModel(WHISPER_MODEL, device="auto", compute_type="auto")
     lines = []
     for file, who in (("me.wav", ME), ("them.wav", THEM)):
-        segs, _ = model.transcribe(str(d / file), language=WHISPER_LANG,
+        segs, _ = model.transcribe(load_wav(d / file), language=WHISPER_LANG,
                                    hotwords=WHISPER_HOTWORDS, vad_filter=True,
                                    condition_on_previous_text=False)
         lines += [(s.start, who, s.text.strip()) for s in segs]
