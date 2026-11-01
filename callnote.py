@@ -17,9 +17,10 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_LANG = os.getenv("WHISPER_LANG") or None  # None = auto-detect
 WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS") or None  # book titles, program terms
 SUMMARY_LANG = os.getenv("SUMMARY_LANG", "Russian")
+LLM = os.getenv("CALLNOTE_LLM", "claude-code")  # claude-code (subscription) | api | ollama
+CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")  # for claude-code and api
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
-CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
 MIN_SECONDS = 30  # shorter captures (e.g. voice messages) are discarded
 GRACE = 5         # seconds the mic may be released before the call counts as over
 
@@ -96,12 +97,23 @@ def post(url, body, headers=None):
 
 
 def llm(prompt):
-    """Claude API if ANTHROPIC_API_KEY is set, otherwise local Ollama."""
-    if key := os.getenv("ANTHROPIC_API_KEY"):
+    if LLM == "claude-code":
+        # Claude Code CLI bills the Claude subscription, but prefers an API key when one is set
+        env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+        r = subprocess.run(
+            ["claude", "-p", "--model", CLAUDE_MODEL, "--tools", "", "--strict-mcp-config",
+             "--no-session-persistence",
+             "--system-prompt", "You write structured notes from call transcripts."],
+            input=prompt, capture_output=True, text=True, env=env)
+        if r.returncode:
+            raise RuntimeError(f"claude: {(r.stdout or r.stderr).strip()}")
+        return r.stdout
+    if LLM == "api":
         r = post("https://api.anthropic.com/v1/messages",
                  {"model": CLAUDE_MODEL, "max_tokens": 8000,
                   "messages": [{"role": "user", "content": prompt}]},
-                 {"x-api-key": key, "anthropic-version": "2023-06-01"})
+                 {"x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                  "anthropic-version": "2023-06-01"})
         return r["content"][0]["text"]
     r = post(f"{OLLAMA_URL}/api/generate",
              {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False,
@@ -167,6 +179,10 @@ if __name__ == "__main__":
         d, _ = record(lambda: False)
         process(d)
     elif cmd == "process" and len(sys.argv) > 2:
-        process(sys.argv[2])
+        try:
+            process(sys.argv[2])
+        except Exception as e:  # runs unattended: surface the failure on the desktop
+            notify(f"Failed on {Path(sys.argv[2]).name}: {e}")
+            raise
     else:
         sys.exit(__doc__)

@@ -3,6 +3,7 @@ Description=Record and summarize browser calls
 After=pipewire-pulse.service
 
 [Service]
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 EnvironmentFile=-%h/.config/callnote.env
 ExecStart=%h/.local/share/callnote/venv/bin/python %h/.local/bin/callnote.py watch
 Restart=on-failure
