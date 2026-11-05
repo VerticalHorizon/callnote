@@ -4,7 +4,7 @@
 Usage:
   callnote.py watch                   # wait for calls, record and write notes automatically
   callnote.py record [TEMPLATE]       # record until Ctrl+C, then write notes
-  callnote.py process DIR [TEMPLATE]  # (re)run transcription and notes for a recording
+  callnote.py process DIR [TEMPLATE]  # (re)write notes; reuses DIR/transcript.txt if present
   callnote.py use [TEMPLATE]          # list templates / switch the current one
 """
 import json, os, re, shutil, signal, subprocess, sys, time, urllib.request, wave
@@ -91,10 +91,16 @@ def transcribe(d):
     model = WhisperModel(WHISPER_MODEL, device="auto", compute_type="auto")
     lines = []
     for file, who in (("me.wav", ME), ("them.wav", THEM)):
-        segs, _ = model.transcribe(load_wav(d / file), language=WHISPER_LANG,
-                                   hotwords=WHISPER_HOTWORDS, vad_filter=True,
-                                   condition_on_previous_text=False)
-        lines += [(s.start, who, s.text.strip()) for s in segs]
+        segs, info = model.transcribe(load_wav(d / file), language=WHISPER_LANG,
+                                      hotwords=WHISPER_HOTWORDS, vad_filter=True,
+                                      condition_on_previous_text=False)
+        step = 10  # next progress mark, %
+        for s in segs:  # segments are decoded lazily, so this loop is the slow part
+            lines.append((s.start, who, s.text.strip()))
+            if (pct := s.end / max(info.duration, 1) * 100) >= step:
+                print(f"{d.name}/{file}: {pct:.0f}%", flush=True)
+                step = pct // 10 * 10 + 10
+        print(f"{d.name}/{file}: done", flush=True)
     return "\n".join(f"[{int(t) // 60:02}:{int(t) % 60:02}] {who}: {text}"
                      for t, who, text in sorted(lines))
 
@@ -154,11 +160,16 @@ def use(name=None):
 def process(d, template=None):
     d, template = Path(d), template or current_template()
     instructions = template_path(template).read_text().strip()  # fail before transcribing
-    notify(f"Transcribing {d.name}...")
-    transcript = transcribe(d)
-    if not transcript:
-        return notify(f"No speech found in {d.name}")
-    (d / "transcript.txt").write_text(transcript + "\n")
+    cached = d / "transcript.txt"
+    if cached.exists():  # transcription is the slow part; delete the file to redo it
+        transcript = cached.read_text().strip()
+    else:
+        notify(f"Transcribing {d.name}...")
+        transcript = transcribe(d)
+        if not transcript:
+            return notify(f"No speech found in {d.name}")
+        cached.write_text(transcript + "\n")
+    print(f"{d.name}: writing notes ({template})", flush=True)
     rules = RULES.format(lang=SUMMARY_LANG, me=ME, them=THEM, transcript=transcript)
     summary = llm(f"{instructions}\n\n{rules}").strip()
     note = d / "summary.md"

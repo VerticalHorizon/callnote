@@ -95,4 +95,6 @@ CALLNOTE_THEM=Them
   PipeWire's echo-cancel module removes what remains.
 - `@DEFAULT_MONITOR@` captures all system audio, so mute other sound sources during a call.
 - Any browser mic capture is recorded; captures under 30 s are discarded.
-- Logs: `journalctl --user -u callnote -f`.
+- `process` reuses an existing `transcript.txt`, so rerunning it after a failed LLM step
+  or with another template is quick. Delete the file to transcribe again.
+- Logs, including transcription progress: `journalctl --user -u callnote -f`.
