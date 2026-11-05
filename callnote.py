@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""callnote: auto-record browser calls, transcribe with Whisper, write session notes with an LLM.
+"""callnote: auto-record calls, transcribe with Whisper, write notes with an LLM.
 
 Usage:
-  callnote.py watch          # wait for calls, record and summarize automatically
-  callnote.py record         # record manually until Ctrl+C, then summarize
-  callnote.py process DIR    # (re)run transcription and summary for a recording
+  callnote.py watch                   # wait for calls, record and write notes automatically
+  callnote.py record [TEMPLATE]       # record until Ctrl+C, then write notes
+  callnote.py process DIR [TEMPLATE]  # (re)run transcription and notes for a recording
+  callnote.py use [TEMPLATE]          # list templates / switch the current one
 """
 import json, os, re, shutil, signal, subprocess, sys, time, urllib.request, wave
 from datetime import datetime
@@ -12,10 +13,12 @@ from pathlib import Path
 
 OUT_DIR = Path(os.getenv("CALLNOTE_DIR", "~/calls")).expanduser()
 APPS = re.compile(os.getenv("CALLNOTE_APPS", "chrom|firefox|brave"), re.I)
+TEMPLATES = Path(os.getenv("CALLNOTE_TEMPLATES", "~/.config/callnote/templates")).expanduser()
+CURRENT = TEMPLATES.parent / "current"  # name of the active template
 ME, THEM = os.getenv("CALLNOTE_ME", "Me"), os.getenv("CALLNOTE_THEM", "Them")
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "large-v3-turbo")
 WHISPER_LANG = os.getenv("WHISPER_LANG") or None  # None = auto-detect
-WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS") or None  # book titles, program terms
+WHISPER_HOTWORDS = os.getenv("WHISPER_HOTWORDS") or None  # names and terms to recognize
 SUMMARY_LANG = os.getenv("SUMMARY_LANG", "Russian")
 LLM = os.getenv("CALLNOTE_LLM", "claude-code")  # claude-code (subscription) | api | ollama
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")  # for claude-code and api
@@ -24,17 +27,14 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:14b")
 MIN_SECONDS = 30  # shorter captures (e.g. voice messages) are discarded
 GRACE = 5         # seconds the mic may be released before the call counts as over
 
-PROMPT = """Below is a transcript of a video call. Write a concise summary in {lang}:
-1. Main topics (1-2 sentences each).
-2. Agreements and decisions.
-3. Action items: who, what, by when.
-4. Open questions.
-Use only what is in the transcript. Fix obvious speech-recognition errors by context.
+# Appended to every template, so templates only describe the structure of the notes
+RULES = """Write in {lang}, in Markdown, starting with a "# " title line.
+Use only what is in the transcript; write "?" instead of guessing.
+Fix obvious speech-recognition errors from context. Skip small talk.
 
-Rules: use only what is in the transcript; write "?" instead of guessing a page or a quote;
-fix obvious speech-recognition errors from context; skip small talk.
+Transcript, one line per phrase: [mm:ss] speaker: text.
+"{me}" is the person keeping these notes, "{them}" is the other side of the call.
 
-Transcript:
 {transcript}"""
 
 
@@ -113,7 +113,7 @@ def llm(prompt):
         r = subprocess.run(
             ["claude", "-p", "--model", CLAUDE_MODEL, "--tools", "", "--strict-mcp-config",
              "--no-session-persistence",
-             "--system-prompt", "You write structured notes from call transcripts."],
+             "--system-prompt", "You write structured notes from transcripts."],
             input=prompt, capture_output=True, text=True, env=env)
         if r.returncode:
             raise RuntimeError(f"claude: {(r.stdout or r.stderr).strip()}")
@@ -131,22 +131,44 @@ def llm(prompt):
     return r["response"]
 
 
-def process(d):
-    d = Path(d)
+def template_path(name):
+    path = TEMPLATES / f"{name}.md"
+    if not path.exists():
+        sys.exit(f"No template '{name}' in {TEMPLATES}")
+    return path
+
+
+def current_template():
+    return CURRENT.read_text().strip() if CURRENT.exists() else "meeting"
+
+
+def use(name=None):
+    """Switch the template used for upcoming calls; list templates, marking the current one."""
+    if name:
+        template_path(name)
+        CURRENT.write_text(name + "\n")
+    for t in sorted(p.stem for p in TEMPLATES.glob("*.md")):
+        print("*" if t == current_template() else " ", t)
+
+
+def process(d, template=None):
+    d, template = Path(d), template or current_template()
+    instructions = template_path(template).read_text().strip()  # fail before transcribing
     notify(f"Transcribing {d.name}...")
     transcript = transcribe(d)
     if not transcript:
         return notify(f"No speech found in {d.name}")
     (d / "transcript.txt").write_text(transcript + "\n")
-    summary = llm(PROMPT.format(lang=SUMMARY_LANG, transcript=transcript)).strip()
+    rules = RULES.format(lang=SUMMARY_LANG, me=ME, them=THEM, transcript=transcript)
+    summary = llm(f"{instructions}\n\n{rules}").strip()
     note = d / "summary.md"
-    note.write_text(f"{summary}\n\n---\n{d.name} · [transcript](transcript.txt)\n")
+    note.write_text(f"{summary}\n\n---\n{d.name} · {template} · [transcript](transcript.txt)\n")
     add_to_index(d, summary)
-    notify(f"Summary ready: {note}")
+    notify(f"Notes ready: {note}")
 
 
 def add_to_index(d, summary):
-    """Append the session to index.md: the table of contents, in call order."""
+    """Append the recording to index.md, a table of contents of all notes in call order."""
     index = d.parent / "index.md"
     if d.name in (index.read_text() if index.exists() else ""):
         return  # reprocessed session, already listed
@@ -181,18 +203,22 @@ def watch():
 
 
 if __name__ == "__main__":
-    cmd = sys.argv[1] if len(sys.argv) > 1 else "watch"
+    cmd, args = (sys.argv[1:] or ["watch"])[0], sys.argv[2:]
     if cmd == "watch":
         watch()
-    elif cmd == "record":
+    elif cmd == "use" and len(args) <= 1:
+        use(*args)
+    elif cmd == "record" and len(args) <= 1:
+        if args:
+            template_path(args[0])  # check before recording, not after
         print("Recording, press Ctrl+C to stop")
         d, _ = record(lambda: False)
-        process(d)
-    elif cmd == "process" and len(sys.argv) > 2:
+        process(d, *args)
+    elif cmd == "process" and 1 <= len(args) <= 2:
         try:
-            process(sys.argv[2])
-        except Exception as e:  # runs unattended: surface the failure on the desktop
-            notify(f"Failed on {Path(sys.argv[2]).name}: {e}")
+            process(*args)
+        except (Exception, SystemExit) as e:  # runs unattended: show the failure on the desktop
+            notify(f"Failed on {Path(args[0]).name}: {e}")
             raise
     else:
         sys.exit(__doc__)
